@@ -15,11 +15,8 @@ Master [git repository](http://github.com/dterei/ghc-lecture):
 
 * `git clone git://github.com/dterei/ghc-lecture.git`
 
-## Licensing
 
-This work is licensed under the Creative Commons Attribution 4.0
-International License. To view a copy of this license, visit
-http://creativecommons.org/licenses/by/4.0/.
+## Licensing
 
 <a rel="license"
 href="http://creativecommons.org/licenses/by/4.0/"><img alt="Creative
