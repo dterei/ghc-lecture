@@ -1,0 +1,779 @@
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+  <meta http-equiv="Content-Type" content="text/html; charset=utf-8" />
+  <meta http-equiv="Content-Style-Type" content="text/css" />
+  <meta name="generator" content="pandoc" />
+  <meta name="author" content="David Terei" />
+  <title>A Haskell Compiler</title>
+  <style type="text/css">code{white-space: pre;}</style>
+  <style type="text/css">
+table.sourceCode, tr.sourceCode, td.lineNumbers, td.sourceCode {
+  margin: 0; padding: 0; vertical-align: baseline; border: none; }
+table.sourceCode { width: 100%; line-height: 100%; }
+td.lineNumbers { text-align: right; padding-right: 4px; padding-left: 4px; color: #aaaaaa; border-right: 1px solid #aaaaaa; }
+td.sourceCode { padding-left: 5px; }
+code > span.kw { color: #007020; font-weight: bold; }
+code > span.dt { color: #902000; }
+code > span.dv { color: #40a070; }
+code > span.bn { color: #40a070; }
+code > span.fl { color: #40a070; }
+code > span.ch { color: #4070a0; }
+code > span.st { color: #4070a0; }
+code > span.co { color: #60a0b0; font-style: italic; }
+code > span.ot { color: #007020; }
+code > span.al { color: #ff0000; font-weight: bold; }
+code > span.fu { color: #06287e; }
+code > span.er { color: #ff0000; font-weight: bold; }
+  </style>
+</head>
+<body>
+<div id="header">
+<h1 class="title">A Haskell Compiler</h1>
+<h2 class="author">David Terei</h2>
+</div>
+<h1 id="why-understand-how-ghc-works">Why understand how GHC works?</h1>
+<ul>
+<li>Understand Core &amp; STG – performance</li>
+<li>Familiarity with functional terminology</li>
+<li>Understand execution model – reasonable cost model</li>
+</ul>
+<h1 id="the-pipeline-of-ghc">The pipeline of GHC</h1>
+<p>Haskell -&gt; GHC Haskell -&gt; Core -&gt; STG -&gt; Cmm -&gt; Assembly</p>
+<!--
+<center>
+![](pipeline.png)
+</center>
+-->
+<h1 id="ghc-supports-haskell-on-top-of-an-unsafe-variant">GHC supports Haskell on top of an unsafe variant</h1>
+<p>Primitive types (GHC.Prim):</p>
+<ul>
+<li>Char#, Int#, Word#, Double#, Float#, Word#</li>
+<li>Array#, ByteArray#, ArrayArray#, MutableArray#</li>
+<li>MutVar#, TVar#, MVar#, ThreadId#</li>
+<li>Addr#, StablePtr#, StableName#, Weak#</li>
+<li>State#</li>
+</ul>
+<p>All primitive types are <em>unlifted</em> – can’t contain <span class="math">⊥</span>.</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">ghci<span class="fu">&gt;</span> <span class="fu">:</span>browse <span class="dt">GHC.Prim</span></code></pre>
+<h1 id="ghc-supports-haskell-on-top-of-an-unsafe-variant-1">GHC supports Haskell on top of an unsafe variant</h1>
+<p>All variants of Int (In8, Int16, Int32, Int64) are represented internally by Int# (64bit) on a 64bit machine.</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Int32</span> <span class="fu">=</span> <span class="dt">I32</span><span class="st"># Int# deriving (Eq, Ord, Typeable)</span>
+
+<span class="kw">instance</span> <span class="dt">Num</span> <span class="dt">Int32</span> <span class="kw">where</span>
+    (<span class="dt">I32</span><span class="st"># x#) + (I32# y#)  = I32# (narrow32Int# (x# +# y#))</span>
+    <span class="fu">...</span></code></pre>
+<p>Data constructors <em>lift</em> a type, allowing <span class="math">⊥</span>.</p>
+<h1 id="ghc-implements-io-through-the-realworld-token">GHC implements IO through the RealWorld token</h1>
+<ul>
+<li>IO Monad is a state passing monad</li>
+<li>Trying to achieve: order of execution + execute once semantics</li>
+</ul>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">newtype</span> <span class="dt">IO</span> a <span class="fu">=</span> <span class="dt">IO</span> (<span class="dt">State</span><span class="st"># RealWorld -&gt; (# State# RealWorld, a #))</span>
+
+<span class="ot">returnIO ::</span> a <span class="ot">-&gt;</span> <span class="dt">IO</span> a
+returnIO x <span class="fu">=</span> <span class="dt">IO</span> <span class="fu">$</span> \ s <span class="ot">-&gt;</span> (<span class="st"># s, x #)</span>
+
+<span class="ot">bindIO ::</span> <span class="dt">IO</span> a <span class="ot">-&gt;</span> (a <span class="ot">-&gt;</span> <span class="dt">IO</span> b) <span class="ot">-&gt;</span> <span class="dt">IO</span> b
+bindIO (<span class="dt">IO</span> m) k <span class="fu">=</span> <span class="dt">IO</span> <span class="fu">$</span> \ s <span class="ot">-&gt;</span> <span class="kw">case</span> m s <span class="kw">of</span> (<span class="st"># new_s, a #) -&gt; unIO (k a) new_s</span></code></pre>
+<ul>
+<li><code>RealWorld</code> token enforces ordering through data dependence</li>
+</ul>
+<h1 id="weve-seen-realworld-before">We’ve seen RealWorld Before</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">comp ::</span> <span class="dt">Handle</span> <span class="ot">-&gt;</span> <span class="dt">IO</span> ()
+comp <span class="fu">=</span> <span class="kw">do</span> name <span class="ot">&lt;-</span> hGetLine h
+          hPutStrLn h name</code></pre>
+<div class="figure">
+<img src="io1.svg" />
+
+</div>
+<pre><code>comp :: GHC.IO.Handle.Types.Handle -&gt; GHC.Prim.State# GHC.Prim.RealWorld
+        -&gt; (# GHC.Prim.State# GHC.Prim.RealWorld, () #)
+comp = \h rw1 -&gt;
+  case GHC.IO.Handle.Text.hGetLine h rw1 of
+    (# rw2, str #) -&gt; GHC.IO.Handle.Text.hPutStr h str rw2</code></pre>
+<h1 id="we-implement-unsafe-io-operations-by-throwing-away-the-world">We implement unsafe IO operations by throwing away the world</h1>
+<ul>
+<li>Various unsafe functions throw away <code>RealWorld</code> token</li>
+<li>No longer have guarantees about order or execution, or execute-one only semantics, optimizer could duplicate, or two threads could race and evaluate the same thunk</li>
+</ul>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">unsafePerformIO ::</span> <span class="dt">IO</span> a <span class="ot">-&gt;</span> a
+unsafePerformIO m <span class="fu">=</span> unsafeDupablePerformIO (noDuplicate <span class="fu">&gt;&gt;</span> m)
+
+<span class="ot">unsafeDupablePerformIO  ::</span> <span class="dt">IO</span> a <span class="ot">-&gt;</span> a
+unsafeDupablePerformIO (<span class="dt">IO</span> m) <span class="fu">=</span> lazy (<span class="kw">case</span> m realWorld<span class="st"># of (# _, r #) -&gt; r)</span></code></pre>
+<h1 id="core-a-small-function-intermediate-language">Core: a small function intermediate language</h1>
+<ul>
+<li><p>Idea: map Haskell to a small lanuage for easier optimization and compilation</p></li>
+<li><p>Functional lazy language</p></li>
+<li><p>It consists of only a hand full of constructs!</p></li>
+</ul>
+<pre><code>variables, literals, let, case, lambda abstraction, application</code></pre>
+<ul>
+<li>In general think, <code>let</code> means allocation, <code>case</code> means evaluation</li>
+</ul>
+<pre><code>ghc -ddump-simpl M.hs &gt; M.core</code></pre>
+<h1 id="core-in-one-slide">Core in one slide</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Expr</span> b <span class="co">-- &quot;b&quot; for the type of binders,</span>
+  <span class="fu">=</span> <span class="dt">Var</span>    <span class="dt">Id</span>
+  <span class="fu">|</span> <span class="dt">Lit</span>   <span class="dt">Literal</span>
+  <span class="fu">|</span> <span class="dt">App</span>   (<span class="dt">Expr</span> b) (<span class="dt">Arg</span> b)
+  <span class="fu">|</span> <span class="dt">Lam</span>   b (<span class="dt">Expr</span> b)
+  <span class="fu">|</span> <span class="dt">Let</span>   (<span class="dt">Bind</span> b) (<span class="dt">Expr</span> b)
+  <span class="fu">|</span> <span class="dt">Case</span>  (<span class="dt">Expr</span> b) b <span class="dt">Type</span> [<span class="dt">Alt</span> b]
+
+  <span class="fu">|</span> <span class="dt">Type</span>  <span class="dt">Type</span>
+  <span class="fu">|</span> <span class="dt">Cast</span>  (<span class="dt">Expr</span> b) <span class="dt">Coercion</span>
+  <span class="fu">|</span> <span class="dt">Coercion</span> <span class="dt">Coercion</span>
+
+  <span class="fu">|</span> <span class="dt">Tick</span>  (<span class="dt">Tickish</span> <span class="dt">Id</span>) (<span class="dt">Expr</span> b)
+
+<span class="kw">data</span> <span class="dt">Bind</span> b <span class="fu">=</span> <span class="dt">NonRec</span> b (<span class="dt">Expr</span> b)
+            <span class="fu">|</span> <span class="dt">Rec</span> [(b, (<span class="dt">Expr</span> b))]
+
+<span class="kw">type</span> <span class="dt">Arg</span> b <span class="fu">=</span> <span class="dt">Expr</span> b
+
+<span class="kw">type</span> <span class="dt">Alt</span> b <span class="fu">=</span> (<span class="dt">AltCon</span>, [b], <span class="dt">Expr</span> b)
+
+<span class="kw">data</span> <span class="dt">AltCon</span> <span class="fu">=</span> <span class="dt">DataAlt</span> <span class="dt">DataCon</span> <span class="fu">|</span> <span class="dt">LitAlt</span>  <span class="dt">Literal</span> <span class="fu">|</span> <span class="dt">DEFAULT</span></code></pre>
+<p>Lets now look at how Haskell is compiled to <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/CoreSynType">Core</a>.</p>
+<h1 id="ghc-haskell-to-core-monomorphic-functions">GHC Haskell to Core: monomorphic functions</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">idChar ::</span> <span class="dt">Char</span> <span class="ot">-&gt;</span> <span class="dt">Char</span>
+idChar c <span class="fu">=</span> c</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">idChar ::</span> <span class="dt">GHC.Types.Char</span> <span class="ot">-&gt;</span> <span class="dt">GHC.Types.Char</span>
+[<span class="dt">GblId</span>, <span class="dt">Arity</span><span class="fu">=</span><span class="dv">1</span>]
+idChar <span class="fu">=</span> \ (<span class="ot">c ::</span> <span class="dt">GHC.Types.Char</span>) <span class="ot">-&gt;</span> c</code></pre>
+<ul>
+<li>[GblId…] specifies various metadata about the function, mostly ignore</li>
+<li>Functions are all lambda abstractions</li>
+<li>Names are fully qualified</li>
+</ul>
+<h1 id="ghc-haskell-to-core-polymorphic-functions">GHC Haskell to Core: polymorphic functions</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">id<span class="ot"> ::</span> a <span class="ot">-&gt;</span> a
+id x <span class="fu">=</span> x
+
+<span class="ot">idChar2 ::</span> <span class="dt">Char</span> <span class="ot">-&gt;</span> <span class="dt">Char</span>
+idChar2 <span class="fu">=</span> id</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">id<span class="ot"> ::</span> forall a<span class="fu">.</span> a <span class="ot">-&gt;</span> a
+id <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="ot">x ::</span> a) <span class="ot">-&gt;</span> x
+
+<span class="ot">idChar2 ::</span> <span class="dt">GHC.Types.Char</span> <span class="ot">-&gt;</span> <span class="dt">GHC.Types.Char</span>
+idChar2 <span class="fu">=</span> id <span class="fu">@</span> <span class="dt">GHC.Types.Char</span></code></pre>
+<ul>
+<li>Types become arguments too! We explicitly pass types and instantiate polymorphic functions</li>
+<li>Type variables are proceeded by @ symbol (read them as ‘at type …’)</li>
+<li>This is known as second order lambda calculus</li>
+<li>GHC uses this representation as it helps with preserving type information during optimization</li>
+</ul>
+<h1 id="ghc-haskell-to-core-polymorphic-functions-1">GHC Haskell to Core: polymorphic functions</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">map<span class="ot"> ::</span> (a <span class="ot">-&gt;</span> b) <span class="ot">-&gt;</span> [a] <span class="ot">-&gt;</span> [b]
+map _ []     <span class="fu">=</span> []
+map f (x<span class="fu">:</span>xs) <span class="fu">=</span> f x <span class="fu">:</span> map f xs</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">map<span class="ot"> ::</span> forall a b<span class="fu">.</span> (a <span class="ot">-&gt;</span> b) <span class="ot">-&gt;</span> [a] <span class="ot">-&gt;</span> [b]
+map <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="fu">@</span> b) (<span class="ot">f ::</span> a <span class="ot">-&gt;</span> b) (<span class="ot">xs ::</span> [a]) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> xs <span class="kw">of</span> _
+      []     <span class="ot">-&gt;</span> <span class="dt">GHC.Types</span><span class="fu">.</span>[] <span class="fu">@</span> b
+      <span class="fu">:</span> y ys <span class="ot">-&gt;</span> <span class="fu">GHC.Types.:</span> <span class="fu">@</span> b (f y) (map <span class="fu">@</span> a <span class="fu">@</span> b f ys)</code></pre>
+<ul>
+<li>Case statements are only place evaluation happens, read them as ‘evaluate’</li>
+</ul>
+<p>New case syntax to make obvious that evaluation is happening:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">case</span> e <span class="kw">of</span> result _
+  __<span class="dt">DEFAULT</span> <span class="ot">-&gt;</span> result</code></pre>
+<h1 id="where-transformed-to-let">Where transformed to let</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">dox ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+dox n <span class="fu">=</span> x <span class="fu">*</span> x
+    <span class="kw">where</span> x <span class="fu">=</span> n <span class="fu">+</span> <span class="dv">2</span></code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">dox ::</span> <span class="dt">GHC.Types.Int</span> <span class="ot">-&gt;</span> <span class="dt">GHC.Types.Int</span>
+dox <span class="fu">=</span> \ (<span class="ot">n ::</span> <span class="dt">GHC.Types.Int</span>) <span class="ot">-&gt;</span>
+    <span class="kw">let</span><span class="ot"> x ::</span> <span class="dt">GHC.Types.Int</span>
+        x <span class="fu">=</span> GHC.base<span class="fu">.</span>plusInt n (<span class="dt">GHC.Types.I</span><span class="st"># 2)</span>
+    <span class="kw">in</span> GHC.base<span class="fu">.</span>multInt x x</code></pre>
+<h1 id="patterns-matching-transformed-to-case-statements">Patterns matching transformed to case statements</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">iff ::</span> <span class="dt">Bool</span> <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a
+iff <span class="dt">True</span>  x _ <span class="fu">=</span> x
+iff <span class="dt">False</span> _ y <span class="fu">=</span> y</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">iff ::</span> forall a<span class="fu">.</span> <span class="dt">GHC.Bool.Bool</span> <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> a
+iff <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="ot">d ::</span> <span class="dt">GHC.Bool.Bool</span>) (<span class="ot">x ::</span> a) (<span class="ot">y ::</span> a) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> d <span class="kw">of</span> _
+      <span class="dt">GHC.Bool.False</span> <span class="ot">-&gt;</span> y
+      <span class="dt">GHC.Bool.True</span>  <span class="ot">-&gt;</span> x</code></pre>
+<h1 id="type-classes-transformed-to-dictionaries">Type classes transformed to dictionaries</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">typeclass <span class="dt">MyEnum</span> a <span class="kw">where</span>
+<span class="ot">   toId  ::</span> a <span class="ot">-&gt;</span> <span class="dt">Int</span>
+<span class="ot">   fromId ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> a</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">MyEnum</span> a <span class="fu">=</span> <span class="dt">DMyEnum</span> (a <span class="ot">-&gt;</span> <span class="dt">Int</span>) (<span class="dt">Int</span> <span class="ot">-&gt;</span> a)
+
+<span class="ot">toId ::</span> forall a<span class="fu">.</span> <span class="dt">MyEnum</span> a <span class="ot">-&gt;</span> a <span class="ot">-&gt;</span> <span class="dt">GHC.Types.Int</span>
+toId <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="ot">d ::</span> <span class="dt">MyEnum</span> a) (<span class="ot">x ::</span> a) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> d <span class="kw">of</span> _
+      <span class="dt">DMyEnum</span> f1 _ <span class="ot">-&gt;</span> f1 x
+
+<span class="ot">fromId ::</span> forall a<span class="fu">.</span> <span class="dt">MyEnum</span> a <span class="ot">-&gt;</span> <span class="dt">GHC.Types.Int</span> <span class="ot">-&gt;</span> a
+fromId <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="ot">d ::</span> <span class="dt">MyEnum</span> a) (<span class="ot">x ::</span> a) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> d <span class="kw">of</span> _
+      <span class="dt">DMyEnum</span> _ f2 <span class="ot">-&gt;</span> f2 x</code></pre>
+<ul>
+<li>Typeclasses are implemented via <em>dictionary</em> data type</li>
+<li>Functions that have type class constraints take an extra dictionary argument</li>
+</ul>
+<h1 id="a-dictionary-constructed-for-each-instance">A dictionary constructed for each instance</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> <span class="dt">MyEnum</span> <span class="dt">Int</span> <span class="kw">where</span>
+   toId <span class="fu">=</span> id
+   fromId <span class="fu">=</span> id</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">fMyEnumInt ::</span> <span class="dt">MyEnum</span> <span class="dt">GHC.Types.Int</span>
+fMyEnumInt <span class="fu">=</span>
+    <span class="dt">DMyEnum</span> <span class="fu">@</span> <span class="dt">GHC.Types.Int</span>
+      (id <span class="fu">@</span> <span class="dt">GHC.Types.Int</span>)
+      (id <span class="fu">@</span> <span class="dt">GHC.Types.Int</span>)</code></pre>
+<h1 id="dictionaries-constructed-from-dictionaries">Dictionaries constructed from dictionaries</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">instance</span> (<span class="dt">MyEnum</span> a) <span class="ot">=&gt;</span> <span class="dt">MyEnum</span> (<span class="dt">Maybe</span> a) <span class="kw">where</span>
+  toId (<span class="dt">Nothing</span>) <span class="fu">=</span> <span class="dv">0</span>
+  toId (<span class="dt">Just</span> n)  <span class="fu">=</span> toId n
+  fromId <span class="dv">0</span>       <span class="fu">=</span> <span class="dt">Nothing</span>
+  fromId n       <span class="fu">=</span> <span class="dt">Just</span> <span class="fu">$</span> fromId n</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">fMyEnumMaybe ::</span> forall a<span class="fu">.</span> <span class="dt">MyEnum</span> a <span class="ot">-&gt;</span> <span class="dt">MyEnum</span> (<span class="dt">Maybe</span> a)
+fMyEnumMaybe <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="ot">dict ::</span> <span class="dt">MyEnum</span> a) <span class="ot">-&gt;</span>
+  <span class="dt">DMyEnum</span> <span class="fu">@</span> (<span class="dt">Maybe</span> a)
+    (fMyEnumMaybe_ctoId <span class="fu">@</span> a dict)
+    (fMyEnumMaybe_cfromId <span class="fu">@</span> a dict)
+
+<span class="ot">fMyEnumMaybe_ctoId ::</span> forall a<span class="fu">.</span> <span class="dt">MyEnum</span> a <span class="ot">-&gt;</span> <span class="dt">Maybe</span> a <span class="ot">-&gt;</span> <span class="dt">Int</span>
+fMyEnumMaybe_ctoId <span class="fu">=</span> \ (<span class="fu">@</span> a) (<span class="ot">dict ::</span> <span class="dt">MyEnum</span> a) (<span class="ot">mx ::</span> <span class="dt">Maybe</span> a) <span class="ot">-&gt;</span>
+  <span class="kw">case</span> mx <span class="kw">of</span> _
+    <span class="dt">Nothing</span> <span class="ot">-&gt;</span> <span class="dt">I</span><span class="st"># 0</span>
+    <span class="dt">Just</span> n  <span class="ot">-&gt;</span> <span class="kw">case</span> (toId <span class="fu">@</span> a dict n) <span class="kw">of</span> _ { <span class="dt">I</span><span class="st"># y -&gt; I# (1 +# y) }</span></code></pre>
+<ul>
+<li>Function with <code>MyEnum (Maybe a)</code> constraint will take in a <code>MyEnum a</code> dictionary as an argument and call <code>fMyEnumMaybe</code> to construct the needed value.</li>
+</ul>
+<h1 id="unpack-unboxes-types">UNPACK unboxes types</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Point</span> <span class="fu">=</span> <span class="dt">Point</span> <span class="ot">{-# UNPACK #-}</span> <span class="fu">!</span><span class="dt">Int</span>
+                   <span class="ot">{-# UNPACK #-}</span> <span class="fu">!</span><span class="dt">Int</span></code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">Point</span> <span class="fu">=</span> <span class="dt">Point</span> <span class="dt">Int</span><span class="st"># Int#</span></code></pre>
+<ul>
+<li>Only one data type for Point exists, GHC doesn’t duplicate it.</li>
+</ul>
+<h1 id="unpack-not-always-a-good-idea">UNPACK not always a good idea</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">addP ::</span> <span class="dt">P</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+addP (<span class="dt">P</span> x y ) <span class="fu">=</span> x <span class="fu">+</span> y</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">addP ::</span> <span class="dt">P</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+addP <span class="fu">=</span> \ (<span class="ot">p ::</span> <span class="dt">P</span>) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> p <span class="kw">of</span> _
+      <span class="dt">P</span> x y <span class="ot">-&gt;</span> <span class="kw">case</span> <span class="fu">+#</span> x y <span class="kw">of</span> z
+        __<span class="dt">DEFAULT</span> <span class="ot">-&gt;</span> <span class="dt">I</span><span class="st"># z</span></code></pre>
+<ul>
+<li>Great code here as working with unboxed types</li>
+</ul>
+<h1 id="unpack-not-always-a-good-idea-1">UNPACK not always a good idea</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">module</span> <span class="dt">M</span> <span class="kw">where</span>
+
+<span class="ot">{-# NOINLINE add #-}</span>
+add x y <span class="fu">=</span> x <span class="fu">+</span> y
+
+<span class="kw">module</span> <span class="dt">P</span> <span class="kw">where</span>
+
+addP_bad (<span class="dt">P</span> x y) <span class="fu">=</span> add x y</code></pre>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">addP_bad <span class="fu">=</span> \ (<span class="ot">p ::</span> <span class="dt">P</span>) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> p <span class="kw">of</span> _ {
+      <span class="dt">P</span> x y <span class="ot">-&gt;</span>
+        <span class="kw">let</span> { x&#39; <span class="fu">=</span> <span class="dt">I</span><span class="st"># x</span>
+              y&#39; <span class="fu">=</span> <span class="dt">I</span><span class="st"># y</span>
+        } <span class="kw">in</span> M.add x&#39; y&#39;
+    }</code></pre>
+<ul>
+<li>Need to unfortunately rebox the types since <code>add</code> only works with boxed types</li>
+</ul>
+<h1 id="core-summary">Core summary</h1>
+<ul>
+<li>Look at Core to get an idea of how your code will perform</li>
+<li>Can see boxing and unboxing</li>
+<li>Language still lazy but <code>case</code> means evaluation, <code>let</code> means allocation</li>
+</ul>
+<h1 id="middle-of-ghc-core---core">Middle of GHC: <em>Core -&gt; Core</em></h1>
+<p>A lot of the optimizations that GHC does is through core to core transformations.</p>
+<p>Lets look at two of them:</p>
+<ul>
+<li>Strictness and unboxing</li>
+<li>SpecConstr</li>
+</ul>
+<pre><code>Fun Fact: Estimated that functional languages gain 20 - 40%
+improvement from inlining Vs. imperative languages which gain 10 - 15%</code></pre>
+<h1 id="strictness-unboxing">Strictness &amp; unboxing</h1>
+<p>Consider this factorial implementation in Haskell:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">fac ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+fac x <span class="dv">0</span> <span class="fu">=</span> a
+fac x n <span class="fu">=</span> fac (n<span class="fu">*</span>x) (n<span class="fu">-</span><span class="dv">1</span>)</code></pre>
+<ul>
+<li>In Haskell <code>x</code> &amp; <code>n</code> must be represented by pointers to a possibly unevaluated objects (thunks)</li>
+<li>Even if evaluated still represented by “boxed” values on the heap</li>
+</ul>
+<h1 id="strictness-unboxing-1">Strictness &amp; unboxing</h1>
+<p>Core</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">fac ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+fac <span class="fu">=</span> \ (<span class="ot">x ::</span> <span class="dt">Int</span>) (<span class="ot">n ::</span> <span class="dt">Int</span>) <span class="ot">-&gt;</span>
+    <span class="kw">case</span> n <span class="kw">of</span> _
+      <span class="dt">I</span><span class="st"># n# -&gt; case n# of _</span>
+                <span class="dv">0</span><span class="st">#        -&gt; x</span>
+                __<span class="dt">DEFAULT</span> <span class="ot">-&gt;</span> <span class="kw">let</span> one <span class="fu">=</span> <span class="dt">I</span><span class="st"># 1</span>
+                                 n&#39; <span class="fu">=</span> n <span class="fu">-</span> one
+                                 x&#39; <span class="fu">=</span> n <span class="fu">*</span> x
+                             <span class="kw">in</span>  fac x&#39; n&#39;</code></pre>
+<ul>
+<li>We allocate thunks before the recursive call and box arguments</li>
+<li><em>But</em> <code>fac</code> will immediately evaluate the thunks and unbox the values!</li>
+</ul>
+<h1 id="ghc-with-strictness-analysis">GHC with strictness analysis</h1>
+<p>Compile <code>fac</code> with optimizations.</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">wfac ::</span> <span class="dt">Int</span><span class="st"># -&gt; Int# -&gt; Int#</span>
+wfac <span class="fu">=</span> \ x<span class="st"># n# -&gt;</span>
+    <span class="kw">case</span> n<span class="st"># of _</span>
+      <span class="dv">0</span><span class="st"># -&gt; x#</span>
+      _  <span class="ot">-&gt;</span> <span class="kw">case</span> (n<span class="st"># -# 1#) of n&#39;#</span>
+              _ <span class="ot">-&gt;</span> <span class="kw">case</span> (n<span class="st"># *# x#) of x&#39;#</span>
+                     _ <span class="ot">-&gt;</span> <span class="fu">$</span>wfac x&#39;<span class="st"># n&#39;#</span>
+
+<span class="ot">fac ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+fac <span class="fu">=</span> \ a n <span class="ot">-&gt;</span>
+    <span class="kw">case</span> a <span class="kw">of</span>
+      <span class="dt">I</span><span class="st"># a# -&gt; case n of</span>
+                 <span class="dt">I</span><span class="st"># n# -&gt; case ($wfac a# n#) of</span>
+                            r<span class="st"># -&gt; I# r#</span></code></pre>
+<ul>
+<li>Create an optimized ‘worker’ and keep original function as ‘wrapper’ to preserve interface</li>
+<li>Must preserve semantics of <span class="math">⊥</span> – <code>fac</code> <span class="math">⊥</span> <code>n = opt(fac)</code> <span class="math">⊥</span> <code>n</code></li>
+<li>As the wrapper uses unboxed types and is tail recursive, this will compile to a tight loop in machine code!</li>
+</ul>
+<h1 id="specconstr-extending-strictness-analysis-to-paths">SpecConstr: Extending strictness analysis to paths</h1>
+<p>The idea of the SpecConstr pass is to extend the strictness and unboxing from before but to functions where arguments aren’t strict in every code path.</p>
+<p>Consider this Haskell function:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">drop<span class="ot"> ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> [a] <span class="ot">-&gt;</span> [a]
+drop n []     <span class="fu">=</span> []
+drop <span class="dv">0</span> xs     <span class="fu">=</span> xs
+drop n (x<span class="fu">:</span>xs) <span class="fu">=</span> drop (n<span class="fu">-</span><span class="dv">1</span>) xs</code></pre>
+<ul>
+<li>Not strict in first argument:
+<ul>
+<li><code>drop</code> <span class="math">⊥</span> [] = []</li>
+<li><code>drop</code> <span class="math">⊥</span> (x:xs) = <span class="math">⊥</span></li>
+</ul></li>
+</ul>
+<h1 id="specconstr-extending-strictness-analysis-to-paths-1">SpecConstr: Extending strictness analysis to paths</h1>
+<p>So we get this code without extra optimization:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">drop n xs <span class="fu">=</span> <span class="kw">case</span> xs <span class="kw">of</span>
+  []     <span class="ot">-&gt;</span> []
+  (y<span class="fu">:</span>ys) <span class="ot">-&gt;</span> <span class="kw">case</span> n <span class="kw">of</span>
+              <span class="dt">I</span><span class="st"># n# -&gt; case n# of</span>
+                          <span class="dv">0</span> <span class="ot">-&gt;</span> []
+                          _ <span class="ot">-&gt;</span> <span class="kw">let</span> n&#39; <span class="fu">=</span> <span class="dt">I</span><span class="st"># (n# -# 1#)</span>
+                               <span class="kw">in</span> drop n&#39; ys</code></pre>
+<ul>
+<li>But after the first call of drop, we are strict in <code>n</code> and always evaluate it!</li>
+</ul>
+<h1 id="specconstr">SpecConstr</h1>
+<p>The SpecConstr pass takes advantage of this to create a specialised version of <code>drop</code> that is only called after we have passed the first check.</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="co">-- works with unboxed n</span>
+drop&#39; n<span class="st"># xs = case xs of</span>
+               []     <span class="ot">-&gt;</span> []
+               (y<span class="fu">:</span>ys) <span class="ot">-&gt;</span> <span class="kw">case</span> n<span class="st"># of</span>
+                           <span class="dv">0</span><span class="st"># -&gt; []</span>
+                           _  <span class="ot">-&gt;</span> drop (n<span class="st"># -# 1#) xs</span>
+
+drop n xs <span class="fu">=</span> <span class="kw">case</span> xs <span class="kw">of</span>
+              []     <span class="ot">-&gt;</span> []
+              (y<span class="fu">:</span>ys) <span class="ot">-&gt;</span> <span class="kw">case</span> n <span class="kw">of</span>
+                          <span class="dt">I</span><span class="st"># n# -&gt; case n# of</span>
+                                      <span class="dv">0</span> <span class="ot">-&gt;</span> []
+                                      _ <span class="ot">-&gt;</span> drop&#39; (n<span class="st"># -# 1#) xs</span></code></pre>
+<ul>
+<li>To stop code size blowing up, GHC limits the amount of specialized functions it creates (specified with the <code>-fspec-constr-threshol</code> and <code>-fspec-constr-count</code> flags)</li>
+</ul>
+<h1 id="stg-code">STG code</h1>
+<ul>
+<li><p>After Core, GHC compiles to another intermediate language called STG</p></li>
+<li>STG is very similar to Core but has one nice additional property:
+<ul>
+<li>laziness is ‘explicit’</li>
+<li><code>case</code> = <em>evaluation</em> and ONLY place evaluation occurs (true in Core)</li>
+<li><code>let</code> = <em>allocation</em> and ONLY place allocation occurs (not true in Core)</li>
+<li>So in STG we can explicitly see thunks being allocated for laziness using <code>let</code></li>
+</ul></li>
+</ul>
+<pre><code>ghc -ddump-stg A.hs &gt; A.stg</code></pre>
+<h1 id="stg-code-1">STG code</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">map<span class="ot"> ::</span> (a <span class="ot">-&gt;</span> b) <span class="ot">-&gt;</span> [a] <span class="ot">-&gt;</span> [b]
+map f []     <span class="fu">=</span> []
+map f (x<span class="fu">:</span>xs) <span class="fu">=</span> f x <span class="fu">:</span> map f xs</code></pre>
+<p>STG</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">map<span class="ot"> ::</span> forall a b<span class="fu">.</span> (a <span class="ot">-&gt;</span> b) <span class="ot">-&gt;</span> [a] <span class="ot">-&gt;</span> [b]
+map <span class="fu">=</span> \r [f xs]
+        <span class="kw">case</span> xs <span class="kw">of</span> _
+          []     <span class="ot">-&gt;</span> [] []
+          <span class="fu">:</span> z zs <span class="ot">-&gt;</span> <span class="kw">let</span> bds <span class="fu">=</span> \u [] map f zs
+                        bd  <span class="fu">=</span> \u [] f z
+                    <span class="kw">in</span> <span class="fu">:</span> [bd bds]</code></pre>
+<ul>
+<li>Lambda abstraction as <code>[arg1 arg2] f</code></li>
+<li><code>\r</code> - re-entrant function</li>
+<li><code>\u</code> - updatable function (i.e., thunk)</li>
+<li>Data constructors applied with <code>[]</code></li>
+</ul>
+<h1 id="graph-reduction-as-a-computational-model-for-haskell">Graph reduction as a computational model for Haskell</h1>
+<p>Graph reduction is a good computational model for lazy functional languages.</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">f g <span class="fu">=</span> <span class="kw">let</span> x <span class="fu">=</span> <span class="dv">2</span> <span class="fu">+</span> <span class="dv">2</span>
+      <span class="kw">in</span> (g x, x)</code></pre>
+<div style="float:left; margin-left: 300px;">
+<div class="figure">
+<img src="graph.png" />
+
+</div>
+</div>
+<h1 id="graph-reduction-as-a-computational-model-for-haskell-1">Graph reduction as a computational model for Haskell</h1>
+<p>Graph reduction is a good computational model for lazy functional languages.</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">f g <span class="fu">=</span> <span class="kw">let</span> x <span class="fu">=</span> <span class="dv">2</span> <span class="fu">+</span> <span class="dv">2</span>
+      <span class="kw">in</span> (g x, x)</code></pre>
+<div style="float:left; margin-left: 300px;">
+<div class="figure">
+<img src="graph-reduced.png" />
+
+</div>
+</div>
+<h1 id="graph-reduction-as-a-computational-model-for-haskell-2">Graph reduction as a computational model for Haskell</h1>
+<p>Graph reduction is a good computational model for lazy functional languages.</p>
+<ul>
+<li>Graph reduction allows lazy evaluation and sharing</li>
+<li><em>let</em>: adds new node to graph</li>
+<li><em>case</em>: expression evaluation, causes the graph to be reduced</li>
+<li>When a node is reduced, it is replaced (or <em>updated</em>) with its result</li>
+</ul>
+<p>Can think of your Haskell program as progressing by either adding new nodes to the graph or reducing existing ones.</p>
+<h1 id="ghc-execution-model">GHC execution model</h1>
+<ul>
+<li>GHC uses closures as a unifying representation</li>
+<li>All objects in the heap are closures</li>
+<li><p>A stack frame is a closure</p></li>
+<li>GHC uses continuation-passing-style</li>
+<li>Always jump to top stack frame to return</li>
+<li><p>Functions will prepare stack in advance to setup call chains</p></li>
+</ul>
+<h1 id="closure-representation">Closure representation</h1>
+<center>
+<table>
+<tr>
+<td>
+Closure
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+Info Table
+</td>
+</tr>
+<tr>
+<td>
+<img src="heap-object.png" />
+</td>
+<td>
+</td>
+<td>
+</td>
+<td>
+<img src="basic-itbl.png" />
+</td>
+</tr>
+</table>
+</center>
+<ul>
+<li>Header usually just a pointer to the code and metadata for the closure</li>
+<li>Get away with single pointer through positive and negative offsets</li>
+<li>Payload contains the closures environment (e.g free variables, function arguments)</li>
+</ul>
+<h1 id="data-closure">Data closure</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">G</span> <span class="fu">=</span> <span class="dt">G</span> (<span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>) <span class="ot">{-# UNPACK #-}</span> <span class="fu">!</span><span class="dt">Int</span></code></pre>
+<ul>
+<li><code>[Header | Pointers... | Non-pointers...]</code></li>
+<li>Payload is the values for the constructor</li>
+<li>Entry code for a constructor just returns</li>
+</ul>
+<pre class="asm"><code>jmp Sp[0]</code></pre>
+<h1 id="function-closures">Function closures</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">f <span class="fu">=</span> \x <span class="ot">-&gt;</span> <span class="kw">let</span> g <span class="fu">=</span> \y <span class="ot">-&gt;</span> x <span class="fu">+</span> y
+          <span class="kw">in</span> g x</code></pre>
+<ul>
+<li>[Header | Pointers… | Non-pointers…]</li>
+<li>Payload is the bound free variables, e.g.,
+<ul>
+<li><code>[ &amp;g | x ]</code></li>
+</ul></li>
+<li>Entry code is the function code</li>
+</ul>
+<h1 id="partial-application-closures-pap">Partial application closures (PAP)</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">foldr (<span class="fu">:</span>)</code></pre>
+<ul>
+<li><code>[Header | Arity | Payload size | Function | Payload]</code></li>
+<li>Arity of the PAP (function of arity 3 with 1 argument applied gives PAP of arity 2)</li>
+<li>Function is the closure of the function that has been partially applied</li>
+<li>PAPs should never be entered so the entry code is some failure code</li>
+</ul>
+<h1 id="thunk-closures">Thunk closures</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell">range <span class="fu">=</span> [<span class="dv">1</span><span class="fu">..</span><span class="dv">100</span>]</code></pre>
+<ul>
+<li><code>[Header | Pointers... | Non-pointers...]</code></li>
+<li>Payload contains the free variables of the expression</li>
+<li>Differ from function closure in that they <em>can be updated</em></li>
+<li>Entry code is the code for the expression</li>
+</ul>
+<h1 id="calling-convention">Calling convention</h1>
+<ul>
+<li>On X86 32bit - all arguments passed on stack</li>
+<li><p>On X86 64bit - first 5 arguments passed in registers, rest on stack</p></li>
+<li><p><code>R1</code> register in Cmm code usually is a pointer to the current closure (i.e., similar to <code>this</code> in OO languages)</p></li>
+</ul>
+<h1 id="handling-thunk-updates">Handling thunk updates</h1>
+<ul>
+<li>Thunks once evaluated should update their node in the graph to be the computed value</li>
+<li>GHC uses a <em>self-updating-model</em> – code unconditionally jumps to a thunk. Up to thunk to update itself, replacing code with value</li>
+<li>If thunk already evaluated, then entry code just returns</li>
+</ul>
+<div class="figure">
+<img src="graph-reduced.png" />
+
+</div>
+<h1 id="handling-thunk-updates-1">Handling thunk updates</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">mk ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+mk x <span class="fu">=</span> x <span class="fu">+</span> <span class="dv">1</span></code></pre>
+<pre class="sourceCode c"><code class="sourceCode c"><span class="co">// thunk entry - setup stack, evaluate x</span>
+mk_entry()
+    entry:
+        <span class="kw">if</span> (Sp - <span class="dv">24</span> &lt; SpLim) <span class="kw">goto</span> gc;       <span class="co">// check for enough stack space</span>
+
+        I64[Sp - <span class="dv">16</span>] = stg_upd_frame_info;  <span class="co">// setup update frame (closure type)</span>
+        I64[Sp -  <span class="dv">8</span>] = R1;                  <span class="co">// set thunk to be updated (payload)</span>
+
+        I64[Sp - <span class="dv">24</span>] = mk_exit;             <span class="co">// setup continuation (+)</span>
+
+        Sp = Sp - <span class="dv">24</span>;                       <span class="co">// decrease stack</span>
+        R1 = I64[R1 + <span class="dv">8</span>];                   <span class="co">// grab &#39;x&#39; from environment</span>
+        jump I64[R1] ();                    <span class="co">// eval &#39;x&#39;</span>
+
+    gc: jump stg_gc_enter_1 ();</code></pre>
+<ul>
+<li><code>stg_upd_frame_info</code> RTS function that handles updating a thunk with it’s result.</li>
+</ul>
+<h1 id="handling-thunk-updates-2">Handling thunk updates</h1>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">mk ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+mk x <span class="fu">=</span> x <span class="fu">+</span> <span class="dv">1</span></code></pre>
+<pre class="sourceCode c"><code class="sourceCode c"><span class="co">// thunk exit - setup value on heap, tear-down stack</span>
+mk_exit()
+    entry:
+        Hp = Hp + <span class="dv">16</span>;
+        <span class="kw">if</span> (Hp &gt; HpLim) <span class="kw">goto</span> gc;
+
+        v::I64 = I64[R1] + <span class="dv">1</span>;               <span class="co">// perform (&#39;x&#39; + 1)</span>
+
+        I64[Hp - <span class="dv">8</span>] = GHC_Types_I_con_info; <span class="co">// setup Int closure</span>
+        I64[Hp + <span class="dv">0</span>] = v::I64;
+
+        R1 = Hp;                            <span class="co">// point R1 to computed thunk value</span>
+        Sp = Sp + <span class="dv">8</span>;                        <span class="co">// pop stack</span>
+        jump (I64[Sp + <span class="dv">0</span>]) ();              <span class="co">// jump to continuation (&#39;stg_upd_frame_info&#39;)</span>
+
+    gc: HpAlloc = <span class="dv">16</span>;
+        jump stg_gc_enter_1 ();</code></pre>
+<h1 id="stg_upd_frame_info-code-updates-a-thunk-with-its-value">stg_upd_frame_info code updates a thunk with its value</h1>
+<ul>
+<li>To update a thunk with its value we need to change its header pointer</li>
+<li>Should point to code that simply returns now</li>
+<li><p>Payload also now needs to include the value</p></li>
+<li>Naive solution would be to synchronize on every thunk access</li>
+<li>But we don’t need to! Races on thunks are fine since we can rely on purity. Races just leads to duplication of work
+<ul>
+<li>This is one reason why <code>unsafePerformIO</code> can lead duplication!</li>
+</ul></li>
+</ul>
+<h1 id="stg_upd_frame_info-code-updates-a-thunk-with-its-value-1">stg_upd_frame_info code updates a thunk with its value</h1>
+<p>Thunk closure:</p>
+<ul>
+<li><p><code>[Header | Pointers... | Non-pointers...]</code></p></li>
+<li><p><code>Header</code> = <code>[ Info Table Pointer | Result Slot ]</code></p></li>
+<li><p>Result slot empty when thunk unevaluated</p></li>
+<li><p>Update code first places result in result slot and secondly changes the info table pointer</p></li>
+<li><p>Safe to do without synchronization (need write barrier) on all architectures GHC supports: no thread will see the new info table pointer without a valid result slot pointer</p></li>
+</ul>
+<h1 id="avoiding-entering-values-with-pointer-tagging">Avoiding entering values with pointer tagging</h1>
+<ul>
+<li><p>Evaluation model is we always enter a closure, even values</p></li>
+<li><p>This is poor for performance, we prefer to avoid entering values every single time</p></li>
+<li><p>An optimization that GHC does is <em>pointer tagging</em>. The trick is to use the final bits of a pointer which are usually zero (last 2 for 32bit, 3 on 64) for storing a ‘tag’</p></li>
+<li>GHC uses this tag for:
+<ul>
+<li>If the object is a constructor, the tag contains the constructor number (if it fits)</li>
+<li>If the object is a function, the tag contains the arity of the function (if it fits)</li>
+</ul></li>
+</ul>
+<h1 id="avoiding-entering-values">Avoiding entering values</h1>
+<p>Our example code from before:</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">mk ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+mk x <span class="fu">=</span> x <span class="fu">+</span> <span class="dv">1</span></code></pre>
+<p>Changes with pointer tagging:</p>
+<pre class="sourceCode c"><code class="sourceCode c">mk_entry()
+    entry:
+         ...
+         R1 = I64[R1 + <span class="dv">16</span>];          <span class="co">// grab &#39;x&#39; from environment</span>
+         <span class="kw">if</span> (R1 &amp; <span class="dv">7</span> != <span class="dv">0</span>) <span class="kw">goto</span> cxd;  <span class="co">// check if &#39;x&#39; is eval&#39;d</span>
+         jump I64[R1] ();            <span class="co">// not eval&#39;d so eval</span>
+    cxd: jump mk_exit ();            <span class="co">// &#39;x&#39; eval&#39;d so jump to (+) continuation</span>
+}
+
+mk_exit()
+    cx0:
+        I64[Hp - <span class="dv">8</span>] = ghczmprim_GHCziTypes_Izh_con_info; <span class="co">// setup Int closure</span>
+        I64[Hp + <span class="dv">0</span>] = v::I64;               <span class="co">// setup Int closure</span>
+        R1 = Hp - <span class="dv">7</span>;                        <span class="co">// point R1 to computed thunk value (with tag)</span>
+        ...
+}</code></pre>
+<h1 id="pointer-tagging-makes-your-own-data-types-efficient">Pointer tagging makes your own data types efficient</h1>
+<ul>
+<li>If the closure is a constructor, the tag contains the constructor number (if it fits).</li>
+</ul>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="kw">data</span> <span class="dt">MyBool</span> a <span class="fu">=</span> <span class="dt">MTrue</span> a <span class="fu">|</span> <span class="dt">MFalse</span> a</code></pre>
+<ul>
+<li>Will be as efficient as using an <code>Int#</code> for representing true and false.</li>
+</ul>
+<h1 id="pointer-tagging-avoids-looking-up-the-info-table">Pointer tagging avoids looking up the info table</h1>
+<p>Haskell</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">mycase ::</span> <span class="dt">Maybe</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+mycase x <span class="fu">=</span> <span class="kw">case</span> x <span class="kw">of</span> <span class="dt">Just</span> z <span class="ot">-&gt;</span> z; <span class="dt">Nothing</span> <span class="ot">-&gt;</span> <span class="dv">10</span></code></pre>
+<p>Cmm</p>
+<pre class="sourceCode c"><code class="sourceCode c">mycase_entry()                          <span class="co">// corresponds to forcing &#39;x&#39;</span>
+    entry:
+        R1 = R2;                        <span class="co">// R1 = &#39;x&#39;</span>
+        I64[Sp - <span class="dv">8</span>] = mycase_exit;      <span class="co">// setup case continuation</span>
+        Sp = Sp - <span class="dv">8</span>;
+        <span class="kw">if</span> (R1 &amp; <span class="dv">7</span> != <span class="dv">0</span>) <span class="kw">goto</span> crL;      <span class="co">// check pointer tag to see if x eval&#39;d</span>
+        jump I64[R1] ();                <span class="co">// x not eval&#39;d, so eval</span>
+    exit:
+        jump mycase_exit ();            <span class="co">// jump to case continuation</span>
+
+mycase_exit()                           <span class="co">// case continuation</span>
+    entry:
+        v::I64 = R1 &amp; <span class="dv">7</span>;                <span class="co">// get tag bits of &#39;x&#39; and put in local variable &#39;v&#39;</span>
+        <span class="kw">if</span> (_crD::I64 &gt;= <span class="dv">2</span>) <span class="kw">goto</span> crE;   <span class="co">// can use tag bits to check which constructor we have</span>
+        R1 = stg_INTLIKE_closure<span class="dv">+417</span>;   <span class="co">// &#39;Nothing&#39; case</span>
+        Sp = Sp + <span class="dv">8</span>;
+        jump (I64[Sp + <span class="dv">0</span>]) ();          <span class="co">// jump to continuation ~= return</span>
+    exit:
+        R1 = I64[R1 + <span class="dv">6</span>];               <span class="co">// get &#39;z&#39; thunk inside Just</span>
+        Sp = Sp + <span class="dv">8</span>;
+        R1 = R1 &amp; (-<span class="dv">8</span>);                 <span class="co">// clear tags on &#39;z&#39;</span>
+        jump I64[R1] ();                <span class="co">// force &#39;z&#39; thunk</span></code></pre>
+<h1 id="bringing-it-all-home">Bringing it all home</h1>
+<p>No lecture on Compilers is complete without assembly code!</p>
+<pre class="sourceCode haskell"><code class="sourceCode haskell"><span class="ot">add ::</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span> <span class="ot">-&gt;</span> <span class="dt">Int</span>
+add x y <span class="fu">=</span> x <span class="fu">+</span> y <span class="fu">+</span> <span class="dv">2</span></code></pre>
+<pre class="assembly"><code>A_add_info:
+.LcvZ:
+    leaq -16(%rbp),%rax
+    cmpq %r15,%rax
+    jb .Lcw1
+    movq %rsi,-8(%rbp)
+    movq %r14,%rbx
+    movq $sul_info,-16(%rbp)
+    addq $-16,%rbp
+    testq $7,%rbx
+    jne sul_info
+    jmp *(%rbx)
+.Lcw1:
+    movl $A_add_closure,%ebx
+    jmp *-8(%r13)
+
+sul_info:
+.LcvS:
+    movq 8(%rbp),%rax
+    movq 7(%rbx),%rcx
+    movq %rcx,8(%rbp)
+    movq %rax,%rbx
+    movq $suk_info,0(%rbp)
+    testq $7,%rbx
+    jne suk_info
+    jmp *(%rbx)
+
+suk_info:
+.LcvK:
+    addq $16,%r12
+    cmpq 144(%r13),%r12
+    ja .LcvP
+    movq 7(%rbx),%rax
+    addq $2,%rax
+    movq 8(%rbp),%rcx
+    addq %rax,%rcx
+    movq $ghczmprim_GHCziTypes_Izh_con_info,-8(%r12)
+    movq %rcx,0(%r12)
+    leaq -7(%r12),%rbx
+    addq $16,%rbp
+    jmp *0(%rbp)
+.LcvP:
+    movq $16,184(%r13)
+.LcvQ:
+    jmp *-16(%r13)</code></pre>
+<h1 id="finished">Finished!</h1>
+<ul>
+<li><p>So that’s is all I can cover in this lecture.</p></li>
+<li>I haven’t covered a few significant areas:
+<ul>
+<li>Typechecking</li>
+<li>Garbage collection</li>
+<li>The scheduler: threads, multi-processor support</li>
+<li>Foreign Function Interface</li>
+<li>Profiling</li>
+<li>Infrastructure of the compiler: Interface files, packages, modular compilation… ect</li>
+<li>Final code generators</li>
+<li>GHCi</li>
+<li>The finer details of lazy evaluation: blackholes</li>
+</ul></li>
+</ul>
+<h1 id="resources-references">Resources &amp; References</h1>
+<p>Here are some resources to learn about GHC, they were also used to create these slides:</p>
+<ul>
+<li>GHC Wiki: <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary">Developer Documentation</a></li>
+<li>GHC Wiki: <a href="http://hackage.haskell.org/trac/ghc/wiki/Commentary/Compiler/GeneratedCode">I know kung fu: learning STG by example</a></li>
+<li>Wikipedia: <a href="http://en.wikipedia.org/wiki/System_F">System F</a></li>
+<li>Paper: <a href="http://www.cse.unsw.edu.au/~pls/thesis/dons-thesis.ps.gz">Multi-paradigm Just-In-Time Compilation</a></li>
+<li>Paper: <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/spineless-tagless-gmachine.ps.gz#26pub=34">Implementing lazy functional languages on stock hardware: the Spineless Tagless G-machine</a></li>
+<li>Paper: <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/pj-lester-book/">Implementing Functional Languages: a tutorial</a></li>
+<li>Paper: <a href="http://research.microsoft.com/apps/pubs/default.aspx?id=79856">Runtime support for Multicore Haskell</a></li>
+<li>Paper: <a href="http://www.google.com/url?sa=t&amp;rct=j&amp;q=Multicore%2BGarbage%2BCollection%2Bwith%2BLocal%2BHeaps&amp;source=web&amp;cd=1&amp;ved=0CCAQFjAA&amp;url=http%3A%2F%2Fcommunity.haskell.org%2F~simonmar%2Fpapers%2Flocal-gc.pdf&amp;ei=YmXBTq3hLoatiAKq3tT5Ag&amp;usg=AFQjCNGH0SgCfqpKQkQxq11Azl3btSk5Dw&amp;sig2=OVzFyZrZRopkhlo7yriv_w">Multicore Garbage Collection with Local Heaps</a></li>
+<li>Paper: <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/parallel-gc/index.htm">Parallel generational-copying garbage collection with a block-structured heap</a></li>
+<li>Paper: <a href="http://research.microsoft.com/en-us/um/people/simonpj/papers/eval-apply/">Making a fast curry: Push/enter vs eval/apply for higher-order languages</a></li>
+<li>Paper: <a href="http://www.haskell.org/ghc/docs/6.10.4/html/ext-core/core.pdf">An External Representation for the GHC Core Language</a></li>
+<li>Paper: <a href="http://research.microsoft.com/~simonpj/Papers/comp-by-trans-scp.ps.gz">A transformation-based optimiser for Haskell</a></li>
+<li>Paper: <a href="http://research.microsoft.com/~simonpj/Papers/rules.htm">Playing by the rules: rewriting as a practical optimisation technique in GHC</a></li>
+<li>Paper: <a href="http://www.research.microsoft.com/~simonpj/Papers/inlining/index.htm">Secrets of the Inliner</a></li>
+<li>Paper: <a href="http://www.haskell.org/ghc/docs/papers/unboxed-values.ps.gz">Unboxed Values as First-Class Citizens</a></li>
+</ul>
+</body>
+</html>

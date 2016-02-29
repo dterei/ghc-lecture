@@ -1,0 +1,74 @@
+
+==================== Tidy Core ====================
+Result size of Tidy Core = {terms: 17, types: 21, coercions: 10}
+
+IO.compIO1
+  :: Handle
+     -> GHC.Prim.State# GHC.Prim.RealWorld
+     -> (# GHC.Prim.State# GHC.Prim.RealWorld, () #)
+[GblId,
+ Arity=2,
+ Str=DmdType <S,U><L,U>,
+ Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True,
+         Guidance=ALWAYS_IF(arity=2,unsat_ok=True,boring_ok=False)
+         Tmpl= \ (h_axk :: Handle)
+                 (eta_B1 [Occ=Once, OS=OneShot]
+                    :: GHC.Prim.State# GHC.Prim.RealWorld) ->
+                 case GHC.IO.Handle.Internals.wantReadableHandle_1
+                        @ String
+                        GHC.IO.Handle.Text.hGetLine4
+                        h_axk
+                        (GHC.IO.Handle.Text.hGetLine2
+                         `cast` (<GHC.IO.Handle.Types.Handle__>_R
+                                 -> Sym (GHC.Types.NTCo:IO[0] <String>_R)
+                                 :: (GHC.IO.Handle.Types.Handle__
+                                     -> GHC.Prim.State# GHC.Prim.RealWorld
+                                     -> (# GHC.Prim.State# GHC.Prim.RealWorld, String #))
+                                    ~R# (GHC.IO.Handle.Types.Handle__ -> IO String)))
+                        eta_B1
+                 of _ [Occ=Dead] { (# ipv_aAw [Occ=Once], ipv1_aAx [Occ=Once] #) ->
+                 GHC.IO.Handle.Text.hPutStr2 h_axk ipv1_aAx GHC.Types.True ipv_aAw
+                 }}]
+IO.compIO1 =
+  \ (h_axk :: Handle)
+    (eta_B1 [OS=OneShot] :: GHC.Prim.State# GHC.Prim.RealWorld) ->
+    case GHC.IO.Handle.Internals.wantReadableHandle_1
+           @ String
+           GHC.IO.Handle.Text.hGetLine4
+           h_axk
+           (GHC.IO.Handle.Text.hGetLine2
+            `cast` (<GHC.IO.Handle.Types.Handle__>_R
+                    -> Sym (GHC.Types.NTCo:IO[0] <String>_R)
+                    :: (GHC.IO.Handle.Types.Handle__
+                        -> GHC.Prim.State# GHC.Prim.RealWorld
+                        -> (# GHC.Prim.State# GHC.Prim.RealWorld, String #))
+                       ~R# (GHC.IO.Handle.Types.Handle__ -> IO String)))
+           eta_B1
+    of _ [Occ=Dead] { (# ipv_aAw, ipv1_aAx #) ->
+    GHC.IO.Handle.Text.hPutStr2 h_axk ipv1_aAx GHC.Types.True ipv_aAw
+    }
+
+compIO :: Handle -> IO ()
+[GblId,
+ Arity=2,
+ Str=DmdType <S,U><L,U>,
+ Unf=Unf{Src=InlineStable, TopLvl=True, Value=True, ConLike=True,
+         WorkFree=True, Expandable=True,
+         Guidance=ALWAYS_IF(arity=0,unsat_ok=True,boring_ok=True)
+         Tmpl= IO.compIO1
+               `cast` (<Handle>_R -> Sym (GHC.Types.NTCo:IO[0] <()>_R)
+                       :: (Handle
+                           -> GHC.Prim.State# GHC.Prim.RealWorld
+                           -> (# GHC.Prim.State# GHC.Prim.RealWorld, () #))
+                          ~R# (Handle -> IO ()))}]
+compIO =
+  IO.compIO1
+  `cast` (<Handle>_R -> Sym (GHC.Types.NTCo:IO[0] <()>_R)
+          :: (Handle
+              -> GHC.Prim.State# GHC.Prim.RealWorld
+              -> (# GHC.Prim.State# GHC.Prim.RealWorld, () #))
+             ~R# (Handle -> IO ()))
+
+
+

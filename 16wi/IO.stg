@@ -1,0 +1,51 @@
+
+==================== STG syntax: ====================
+IO.myid :: forall a_ayy. a_ayy -> a_ayy
+[GblId, Str=DmdType] =
+    \u srt:SRT:[r2E :-> GHC.Base.id] [] GHC.Base.id;
+IO.mkT :: GHC.Types.Int -> GHC.Types.Int -> IO.T
+[GblId, Arity=2, Caf=NoCafRefs, Str=DmdType, Unf=OtherCon []] =
+    \r srt:SRT:[] [eta_B2 eta_B1] IO.T [eta_B2 eta_B1];
+IO.mmap
+  :: forall a_apq b_apr. (a_apq -> b_apr) -> [a_apq] -> [b_apr]
+[GblId, Arity=2, Str=DmdType, Unf=OtherCon []] =
+    \r srt:SRT:[01X :-> GHC.Base.map] [f_sIa ds_sIb]
+        case ds_sIb of _ [Occ=Dead] {
+          [] -> [] [];
+          : x_sId [Occ=Once] xs_sIe [Occ=Once] ->
+              let {
+                sat_sIg [Occ=Once] :: [b_ayg]
+                [LclId, Str=DmdType] =
+                    \u srt:SRT:[01X :-> GHC.Base.map] []
+                        GHC.Base.map f_sIa xs_sIe; } in
+              let {
+                sat_sIf [Occ=Once] :: b_ayg
+                [LclId, Str=DmdType] =
+                    \u srt:SRT:[] [] f_sIa x_sId;
+              } in  : [sat_sIf sat_sIg];
+        };
+IO.compIO :: GHC.IO.Handle.Types.Handle -> GHC.Types.IO ()
+[GblId, Arity=1, Str=DmdType, Unf=OtherCon []] =
+    \r srt:SRT:[r4M :-> GHC.IO.Handle.Text.hPutStrLn,
+                r4R :-> GHC.IO.Handle.Text.hGetLine,
+                r78 :-> GHC.Base.$fMonadIO] [h_sIh]
+        let {
+          sat_sIk [Occ=Once] :: GHC.Base.String -> GHC.Types.IO ()
+          [LclId, Str=DmdType] =
+              \r srt:SRT:[r4M :-> GHC.IO.Handle.Text.hPutStrLn] [name_sIj]
+                  GHC.IO.Handle.Text.hPutStrLn h_sIh name_sIj; } in
+        let {
+          sat_sIi [Occ=Once] :: GHC.Types.IO GHC.Base.String
+          [LclId, Str=DmdType] =
+              \u srt:SRT:[r4R :-> GHC.IO.Handle.Text.hGetLine] []
+                  GHC.IO.Handle.Text.hGetLine h_sIh;
+        } in  GHC.Base.>>= GHC.Base.$fMonadIO sat_sIi sat_sIk;
+IO.T :: GHC.Types.Int -> GHC.Types.Int -> IO.T
+[GblId[DataCon],
+ Arity=2,
+ Caf=NoCafRefs,
+ Str=DmdType <L,U><L,U>m,
+ Unf=OtherCon []] =
+    \r srt:SRT:[] [eta_B2 eta_B1] IO.T [eta_B2 eta_B1];
+
+
