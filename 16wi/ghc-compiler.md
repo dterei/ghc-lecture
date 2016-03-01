@@ -13,11 +13,13 @@
 
 Haskell -> GHC Haskell -> Core -> STG -> Cmm -> Assembly
 
-<!--
-<center>
-![](pipeline.png)
-</center>
--->
+* GHC Haskell: Used by libraries to implement Haskell proper but expose manual
+  optimization opportunities and extract commonalities into library code rather
+  than the compiler
+* Core: 'Simple' functional language for optimization
+* STG: Variant of core that makes laziness more explicit for easier compilation
+* Cmm: Procedural language for portability among backends (LLVM or
+  native-code-generator) and architectures (x86, ARM, PowerPC).
 
 
 # GHC supports Haskell on top of an unsafe variant
@@ -232,7 +234,7 @@ map = \ (@ a) (@ b) (f :: a -> b) (xs :: [a]) ->
 New case syntax to make obvious that evaluation is happening:
 
 ``` {.haskell}
-case e of result _
+case e of result
   __DEFAULT -> result
 ```
 
@@ -422,16 +424,14 @@ Core
 
 ``` {.haskell}
 addP_bad = \ (p :: P) ->
-    case p of _ {
+    case p of _
       P x y ->
-        let { x' = I# x
-              y' = I# y
-        } in M.add x' y'
-    }
+        let x' = I# x
+            y' = I# y
+        in M.add x' y'
 ```
 
-* Need to unfortunately rebox the types since `add` only works with boxed
-  types
+* Need to unfortunately rebox the types since `add` only works with boxed types
 
 
 # Core summary
@@ -497,8 +497,8 @@ fac = \ (x :: Int) (n :: Int) ->
 Compile `fac` with optimizations.
 
 ``` {.haskell}
-wfac :: Int# -> Int# -> Int#
-wfac = \ x# n# ->
+$wfac :: Int# -> Int# -> Int#
+$wfac = \ x# n# ->
     case n# of _
       0# -> x#
       _  -> case (n# -# 1#) of n'#
@@ -569,7 +569,7 @@ drop' n# xs = case xs of
                []     -> []
                (y:ys) -> case n# of
                            0# -> []
-                           _  -> drop (n# -# 1#) xs
+                           _  -> drop' (n# -# 1#) xs
 
 drop n xs = case xs of
               []     -> []
@@ -837,9 +837,10 @@ mk_exit()
 * Payload also now needs to include the value
 
 * Naive solution would be to synchronize on every thunk access
-* But we don't need to! Races on thunks are fine since we can rely on purity.
+* But we don't need to! Races on thunks are fine since we can rely on purity
   Races just leads to duplication of work
-    * This is one reason why `unsafePerformIO` can lead duplication!
+* This is one reason why `unsafeDupablePerformIO` can lead duplication! And
+  explains the check that `unsafePerformIO` has to avoid this
 
 
 # stg_upd_frame_info code updates a thunk with its value
@@ -920,6 +921,9 @@ data MyBool a = MTrue a | MFalse a
 
 * Will be as efficient as using an `Int#` for representing true and false.
 
+* If your type has more constructors than the tag bits allow (4 or more on
+  32bit, 8 or more on 64bit) then GHC just uses the tag bits 0 or 1 to
+  represent evaluated or unevaluated.
 
 # Pointer tagging avoids looking up the info table
 
@@ -1053,4 +1057,5 @@ create these slides:
 * Paper: [Playing by the rules: rewriting as a practical optimisation technique in GHC](http://research.microsoft.com/~simonpj/Papers/rules.htm)
 * Paper: [Secrets of the Inliner](http://www.research.microsoft.com/~simonpj/Papers/inlining/index.htm)
 * Paper: [Unboxed Values as First-Class Citizens](http://www.haskell.org/ghc/docs/papers/unboxed-values.ps.gz)
+
 
