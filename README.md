@@ -15,7 +15,6 @@ Master [git repository](http://github.com/dterei/ghc-lecture):
 
 * `git clone git://github.com/dterei/ghc-lecture.git`
 
-
 ## Licensing
 
 <a rel="license"
